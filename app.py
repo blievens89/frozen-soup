@@ -388,11 +388,12 @@ if st.session_state.results:
         
         chart_metric_col = metric_mapping_clean[chart_metric_display]
 
-        chart = alt.Chart(chart_df).mark_bar().encode(
+        chart = alt.Chart(chart_df).mark_bar(
+            color="#00f7a5" # UPDATED: Set bar color to brand's teal/green
+        ).encode(
             x=alt.X('Intent:N', sort='-y', title='Search Intent'),
             y=alt.Y(f'{chart_metric_col}:Q', title=chart_metric_display),
-            color=alt.Color('Intent:N', legend=None), # Add color to bars
-            tooltip=['Intent', alt.Tooltip(f'{chart_metric_col}:Q', title=chart_metric_display)]
+            tooltip=['Intent', alt.Tooltip(f'{chart_metric_col}:Q', title=chart_metric_display, format=',.0f')]
         ).properties(
             title=f'{chart_metric_display} by Search Intent'
         ).configure_axis(
@@ -400,7 +401,7 @@ if st.session_state.results:
         ).configure_title(
             fontSize=16
         )
-        st.altair_chart(chart, use_container_width=True, theme="streamlit")
+        st.altair_chart(chart, use_container_width=True, theme=None) # Use theme=None to respect config.toml
 
     else:
         st.warning("Could not generate intent summary as no intent data was returned.")
