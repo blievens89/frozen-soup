@@ -389,7 +389,7 @@ if st.session_state.results:
         chart_metric_col = metric_mapping_clean[chart_metric_display]
 
         chart = alt.Chart(chart_df).mark_bar(
-            color="#00f7a5" # UPDATED: Set bar color to brand's teal/green
+            color="#48d597" # UPDATED: Set bar color to brand's new green
         ).encode(
             x=alt.X('Intent:N', sort='-y', title='Search Intent'),
             y=alt.Y(f'{chart_metric_col}:Q', title=chart_metric_display),
