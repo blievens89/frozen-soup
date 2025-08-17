@@ -149,6 +149,19 @@ with st.sidebar:
             cvrs[intent] = st.number_input(f"{intent.title()} CVR", 0.0, 1.0, cvr_defaults[intent], 0.005, format="%.3f", key=f"cvr_{intent}")
 
     st.divider()
+    # NEW: Budgeting section
+    st.header("Budgeting")
+    use_custom_budget = st.toggle("Set Custom Budget", value=False)
+    if use_custom_budget:
+        total_budget = st.number_input("Total Monthly Budget (£)", min_value=0.0, value=1000.0, step=100.0)
+        st.caption("Allocate budget by intent (%)")
+        
+        budget_allocations = {}
+        # Ensure allocations sum to 100
+        # This is a simple implementation; more complex logic could enforce the sum.
+        for intent in intents:
+            budget_allocations[intent] = st.number_input(f"{intent.title()} %", min_value=0, max_value=100, value=25, key=f"budget_{intent}")
+
     show_raw_data = st.toggle("Show Raw API Data (for debugging)", value=False)
 
 
@@ -288,14 +301,34 @@ if st.session_state.results:
 
         summary["CTR"] = summary["Intent"].map(ctrs)
         summary["CVR"] = summary["Intent"].map(cvrs)
-        summary["Clicks"] = (summary["total_volume"] * summary["CTR"]).round(0)
-        summary["Avg CPC £"] = summary["avg_cpc_gbp"].round(2)
-        summary["Spend £"] = (summary["Clicks"] * summary["Avg CPC £"]).round(2)
+        
+        # Calculate max potential values first
+        summary["Max Clicks"] = (summary["total_volume"] * summary["CTR"]).round(0)
+        summary["Max Spend £"] = (summary["Max Clicks"] * summary["avg_cpc_gbp"]).round(2)
+        
+        required_budget = summary["Max Spend £"].sum()
+        if not use_custom_budget:
+            st.sidebar.metric("Required Budget", f"£{required_budget:,.2f}")
+
+        # Adjust calculations based on budget
+        if use_custom_budget:
+            summary["Budget £"] = summary["Intent"].map(budget_allocations) * total_budget / 100
+            # If budget is less than max spend, scale down clicks. Otherwise, use max clicks.
+            summary["Clicks"] = np.where(
+                summary["Budget £"] < summary["Max Spend £"],
+                (summary["Budget £"] / summary["avg_cpc_gbp"]).round(0),
+                summary["Max Clicks"]
+            )
+            summary["Spend £"] = summary["Clicks"] * summary["avg_cpc_gbp"]
+        else:
+            summary["Clicks"] = summary["Max Clicks"]
+            summary["Spend £"] = summary["Max Spend £"]
+
         summary["Conversions"] = (summary["Clicks"] * summary["CVR"]).round(0)
         summary["CPA £"] = (summary["Spend £"] / summary["Conversions"]).replace([np.inf, -np.inf], 0).round(2)
 
         st.subheader("Grouped by Search Intent")
-        st.dataframe(summary.fillna("—"), use_container_width=True)
+        st.dataframe(summary[['Intent', 'keywords', 'total_volume', 'Clicks', 'Spend £', 'Conversions', 'CPA £']].fillna("—"), use_container_width=True)
 
         # --- Blended Overview ---
         total_keywords = summary["keywords"].sum()
