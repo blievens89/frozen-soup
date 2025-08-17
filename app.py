@@ -205,7 +205,6 @@ def get_keyword_metrics(keywords: list, lang_code: str, loc_name: str) -> pd.Dat
 
 @st.cache_data(ttl=3600, show_spinner="Analysing search intent...")
 def get_search_intent(keywords: list, lang_code: str) -> pd.DataFrame:
-    # FIX: Added lang_code back into the function definition and payload
     payload_item = {
         "keywords": keywords,
         "language_code": lang_code.strip()
@@ -252,7 +251,6 @@ if st.button("Analyse Keywords", type="primary"):
         
         # Get intent for the retrieved keywords
         intent_keywords = df_metrics['keyword_clean'].tolist()
-        # FIX: Pass language_code to the function
         df_intent = get_search_intent(intent_keywords, language_code)
 
         if not df_intent.empty:
@@ -299,24 +297,6 @@ if st.session_state.results:
         st.subheader("Grouped by Search Intent")
         st.dataframe(summary.fillna("—"), use_container_width=True)
 
-        # --- NEW: Visualisation Section ---
-        st.subheader("Performance by Intent")
-        
-        chart_metric = st.selectbox(
-            "Choose a metric to visualise",
-            ("Total Volume", "Clicks", "Spend £", "Conversions", "CPA £")
-        )
-
-        chart = alt.Chart(summary).mark_bar().encode(
-            x=alt.X('Intent:N', sort='-y'),
-            y=alt.Y(f'{chart_metric}:Q', title=chart_metric),
-            tooltip=['Intent', chart_metric]
-        ).properties(
-            title=f'{chart_metric} by Search Intent'
-        )
-        st.altair_chart(chart, use_container_width=True)
-
-
         # --- Blended Overview ---
         total_keywords = summary["keywords"].sum()
         total_volume = summary["total_volume"].sum()
@@ -342,6 +322,53 @@ if st.session_state.results:
         })
         st.subheader("Blended Overview (Weighted)")
         st.dataframe(blended_overview, use_container_width=True)
+
+        # --- Visualisation Section (MOVED AND FIXED) ---
+        st.subheader("Performance by Intent")
+        
+        # FIX: Create a mapping from user-friendly names to actual DataFrame column names
+        metric_mapping = {
+            "Total Volume": "total_volume",
+            "Clicks": "Clicks",
+            "Spend (£)": "Spend £",
+            "Conversions": "Conversions",
+            "CPA (£)": "CPA £"
+        }
+        
+        # FIX: Rename columns in a copy of the summary df for Altair compatibility
+        chart_df = summary.copy()
+        chart_df.columns = [col.replace('£', 'GBP').replace(' ', '_') for col in chart_df.columns]
+        
+        # Update mapping to new clean names
+        metric_mapping_clean = {
+            "Total Volume": "total_volume",
+            "Clicks": "Clicks",
+            "Spend (£)": "Spend_GBP",
+            "Conversions": "Conversions",
+            "CPA (£)": "CPA_GBP"
+        }
+
+        chart_metric_display = st.selectbox(
+            "Choose a metric to visualise",
+            list(metric_mapping_clean.keys())
+        )
+        
+        chart_metric_col = metric_mapping_clean[chart_metric_display]
+
+        chart = alt.Chart(chart_df).mark_bar().encode(
+            x=alt.X('Intent:N', sort='-y', title='Search Intent'),
+            y=alt.Y(f'{chart_metric_col}:Q', title=chart_metric_display),
+            color=alt.Color('Intent:N', legend=None), # Add color to bars
+            tooltip=['Intent', alt.Tooltip(f'{chart_metric_col}:Q', title=chart_metric_display)]
+        ).properties(
+            title=f'{chart_metric_display} by Search Intent'
+        ).configure_axis(
+            labelAngle=0 # Keep labels horizontal
+        ).configure_title(
+            fontSize=16
+        )
+        st.altair_chart(chart, use_container_width=True, theme="streamlit")
+
     else:
         st.warning("Could not generate intent summary as no intent data was returned.")
 
