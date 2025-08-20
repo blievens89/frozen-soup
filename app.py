@@ -1,9 +1,3 @@
-# DataForSEO Labs — Keyword Ideas + Intent Planner (Live, trial-safe)
-# - Seed keyword -> up to 20 suggestions with volume/CPC/competition
-# - Search Intent (language-only, no location needed)
-# - Group by intent with CTR/CVR assumptions + blended totals
-# - Password gate (session-state) + caching + raw-debug
-
 import os
 import io
 import streamlit as st
@@ -11,35 +5,27 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
-# Import the official RestClient
 from Client.client import RestClient
 
 st.set_page_config(page_title="Labs Keyword Ideas + Intent (Live)", layout="wide")
 st.title("DataForSEO Labs — Keyword & Intent Planner")
 
-# --- Initialise Session State ---
-# This ensures the variables exist on the first run
 if 'results' not in st.session_state:
     st.session_state.results = None
 
-# --- Password Gate ---
-# Ensures the application is not publicly accessible without a password.
 if "authed" not in st.session_state:
     st.session_state.authed = False
 
 if not st.session_state.authed:
     password_input = st.text_input("Password", type="password")
     if st.button("Enter"):
-        # Compare the input with the secret stored in Streamlit Cloud.
         if password_input == st.secrets.get("APP_PASSWORD"):
             st.session_state.authed = True
-            st.rerun() # Rerun the script to show the main app
+            st.rerun()
         else:
             st.error("The password you entered is incorrect.")
-    st.stop() # Stop execution until authenticated
+    st.stop()
 
-# --- API Credentials ---
-# Fetches DataForSEO credentials securely from Streamlit secrets.
 DATAFORSEO_LOGIN = st.secrets.get("DATAFORSEO_LOGIN")
 DATAFORSEO_PASSWORD = st.secrets.get("DATAFORSEO_PASSWORD")
 
@@ -47,8 +33,6 @@ if not (DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD):
     st.error("DataForSEO API credentials are not found. Please set DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD in your Streamlit secrets.")
     st.stop()
 
-# --- API Client Initialisation ---
-# Use the provided RestClient to interact with the DataForSEO API.
 try:
     client = RestClient(DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD)
     BASE_URL = "/v3"
@@ -56,32 +40,21 @@ except Exception as e:
     st.error(f"Failed to initialise the API client: {e}")
     st.stop()
 
-# --- Helper Functions ---
-
 def make_api_post_request(endpoint: str, payload: dict) -> dict:
-    """
-    Makes a POST request to a DataForSEO endpoint and handles errors.
-    Note: The payload must be a dictionary as expected by the official RestClient.
-    """
     try:
         response = client.post(f"{BASE_URL}{endpoint}", payload)
-        # A successful response should have a 20000 status_code.
         if response and response.get("status_code") == 20000:
             return response
         else:
             st.error(f"API Error on {endpoint}: {response.get('status_message', 'Unknown error')}")
-            st.json(response) # Show the full error response for debugging
+            st.json(response)
             return {}
     except Exception as e:
         st.error(f"An exception occurred while calling the API endpoint {endpoint}: {e}")
         return {}
 
 def extract_items_from_response(response: dict) -> list[dict]:
-    """
-    Safely extracts the 'items' list from a standard DataForSEO API response.
-    """
     try:
-        # Check if the task was successful before trying to access results
         if response.get("tasks_error", 1) > 0:
             st.warning("The API task returned an error. See raw response for details.")
             return []
@@ -90,17 +63,12 @@ def extract_items_from_response(response: dict) -> list[dict]:
         return []
 
 def safe_average(series: pd.Series) -> float:
-    """
-    Calculates a safe average of a pandas Series, ignoring non-numeric values.
-    """
     numeric_series = pd.to_numeric(series, errors='coerce').dropna()
     return numeric_series.mean() if not numeric_series.empty else np.nan
 
-# --- Sidebar Inputs ---
 with st.sidebar:
     st.header("Inputs")
     
-    # NEW: Analysis mode selector
     analysis_mode = st.radio(
         "Analysis Mode",
         ("Generate from Seed Keyword", "Analyse My Keyword List"),
@@ -110,7 +78,6 @@ with st.sidebar:
     language_code = st.text_input("Language Code (e.g., en, fr, de)", value="en")
     location_name = st.text_input("Location Name", value="United Kingdom")
     
-    # Conditional UI based on analysis mode
     if analysis_mode == "Generate from Seed Keyword":
         seed_keyword = st.text_input("Seed Keyword", value="remortgage")
         limit = st.slider("Max Keyword Ideas", 10, 300, 50, step=10)
@@ -122,23 +89,18 @@ with st.sidebar:
         
         uploaded_keywords = []
         if pasted_keywords:
-            # FIX: Use splitlines() to handle different line endings and strip each line
             lines = pasted_keywords.splitlines()
             cleaned_lines = [line.strip() for line in lines if line.strip()]
             uploaded_keywords.extend(cleaned_lines)
         if uploaded_file:
-            # FIX: Use pandas to robustly read the uploaded file
             try:
-                # We assume the keywords are in the first column, with no header
                 df_upload = pd.read_csv(uploaded_file, header=None)
                 lines = df_upload[0].dropna().astype(str).tolist()
                 uploaded_keywords.extend(lines)
             except Exception as e:
                 st.error(f"Error reading file: {e}")
 
-        # Deduplicate
         uploaded_keywords = list(dict.fromkeys(filter(None, uploaded_keywords)))
-
 
     usd_to_gbp_rate = st.number_input("USD to GBP Exchange Rate", 0.1, 2.0, 0.79, 0.01)
 
@@ -156,7 +118,6 @@ with st.sidebar:
             cvrs[intent] = st.number_input(f"{intent.title()} CVR", 0.0, 1.0, cvr_defaults[intent], 0.005, format="%.3f", key=f"cvr_{intent}")
 
     st.divider()
-    # NEW: Budgeting section
     st.header("Budgeting")
     use_custom_budget = st.toggle("Set Custom Budget", value=False)
     if use_custom_budget:
@@ -164,15 +125,10 @@ with st.sidebar:
         st.caption("Allocate budget by intent (%)")
         
         budget_allocations = {}
-        # Ensure allocations sum to 100
-        # This is a simple implementation; more complex logic could enforce the sum.
         for intent in intents:
             budget_allocations[intent] = st.number_input(f"{intent.title()} %", min_value=0, max_value=100, value=25, key=f"budget_{intent}")
 
     show_raw_data = st.toggle("Show Raw API Data (for debugging)", value=False)
-
-
-# --- API FUNCTIONS ---
 
 @st.cache_data(ttl=3600, show_spinner="Fetching keyword suggestions...")
 def get_keyword_suggestions(seed: str, lang_code: str, loc_name: str, limit: int) -> pd.DataFrame:
@@ -222,7 +178,6 @@ def get_keyword_metrics(keywords: list, lang_code: str, loc_name: str) -> pd.Dat
         })
     return pd.DataFrame(rows)
 
-
 @st.cache_data(ttl=3600, show_spinner="Analysing search intent...")
 def get_search_intent(keywords: list, lang_code: str) -> pd.DataFrame:
     payload_item = {
@@ -246,17 +201,12 @@ def get_search_intent(keywords: list, lang_code: str) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-
-# --- Main Application Logic ---
-
 if st.button("Analyse Keywords", type="primary"):
-    
     df_metrics = pd.DataFrame()
 
     if analysis_mode == "Generate from Seed Keyword":
         df_metrics = get_keyword_suggestions(seed_keyword, language_code, location_name, limit)
     elif uploaded_keywords:
-        # Chunk keywords into batches of 1000 for the API
         keyword_chunks = [uploaded_keywords[i:i + 1000] for i in range(0, len(uploaded_keywords), 1000)]
         results_list = []
         for chunk in keyword_chunks:
@@ -269,7 +219,6 @@ if st.button("Analyse Keywords", type="primary"):
     else:
         df_metrics['keyword_clean'] = df_metrics['keyword'].str.lower().str.strip()
         
-        # Get intent for the retrieved keywords
         intent_keywords = df_metrics['keyword_clean'].tolist()
         df_intent = get_search_intent(intent_keywords, language_code)
 
@@ -283,8 +232,6 @@ if st.button("Analyse Keywords", type="primary"):
 
         st.session_state.results = {"df_merged": df_merged.dropna(subset=['keyword'])}
 
-
-# --- Display Results (if they exist in session state) ---
 if st.session_state.results:
     df_merged = st.session_state.results["df_merged"]
 
@@ -309,7 +256,6 @@ if st.session_state.results:
         summary["CTR"] = summary["Intent"].map(ctrs)
         summary["CVR"] = summary["Intent"].map(cvrs)
         
-        # Calculate max potential values first
         summary["Max Clicks"] = (summary["total_volume"] * summary["CTR"]).round(0)
         summary["Max Spend £"] = (summary["Max Clicks"] * summary["avg_cpc_gbp"]).round(2)
         
@@ -317,10 +263,8 @@ if st.session_state.results:
         if not use_custom_budget:
             st.sidebar.metric("Required Budget", f"£{required_budget:,.2f}")
 
-        # Adjust calculations based on budget
         if use_custom_budget:
             summary["Budget £"] = summary["Intent"].map(budget_allocations) * total_budget / 100
-            # If budget is less than max spend, scale down clicks. Otherwise, use max clicks.
             summary["Clicks"] = np.where(
                 summary["Budget £"] < summary["Max Spend £"],
                 (summary["Budget £"] / summary["avg_cpc_gbp"]).round(0),
@@ -337,7 +281,6 @@ if st.session_state.results:
         st.subheader("Grouped by Search Intent")
         st.dataframe(summary[['Intent', 'keywords', 'total_volume', 'Clicks', 'Spend £', 'Conversions', 'CPA £']].fillna("—"), use_container_width=True)
 
-        # --- Blended Overview ---
         total_keywords = summary["keywords"].sum()
         total_volume = summary["total_volume"].sum()
         total_clicks = summary["Clicks"].sum()
@@ -363,23 +306,8 @@ if st.session_state.results:
         st.subheader("Blended Overview (Weighted)")
         st.dataframe(blended_overview, use_container_width=True)
 
-        # --- Visualisation Section (MOVED AND FIXED) ---
         st.subheader("Performance by Intent")
         
-        # FIX: Create a mapping from user-friendly names to actual DataFrame column names
-        metric_mapping = {
-            "Total Volume": "total_volume",
-            "Clicks": "Clicks",
-            "Spend (£)": "Spend £",
-            "Conversions": "Conversions",
-            "CPA (£)": "CPA £"
-        }
-        
-        # FIX: Rename columns in a copy of the summary df for Altair compatibility
-        chart_df = summary.copy()
-        chart_df.columns = [col.replace('£', 'GBP').replace(' ', '_') for col in chart_df.columns]
-        
-        # Update mapping to new clean names
         metric_mapping_clean = {
             "Total Volume": "total_volume",
             "Clicks": "Clicks",
@@ -393,10 +321,12 @@ if st.session_state.results:
             list(metric_mapping_clean.keys())
         )
         
+        chart_df = summary.copy()
+        chart_df.columns = [col.replace('£', 'GBP').replace(' ', '_') for col in chart_df.columns]
         chart_metric_col = metric_mapping_clean[chart_metric_display]
 
         chart = alt.Chart(chart_df).mark_bar(
-            color="#48d597" # UPDATED: Set bar color to brand's new green
+            color="#48d597"
         ).encode(
             x=alt.X('Intent:N', sort='-y', title='Search Intent'),
             y=alt.Y(f'{chart_metric_col}:Q', title=chart_metric_display),
@@ -404,16 +334,15 @@ if st.session_state.results:
         ).properties(
             title=f'{chart_metric_display} by Search Intent'
         ).configure_axis(
-            labelAngle=0 # Keep labels horizontal
+            labelAngle=0
         ).configure_title(
             fontSize=16
         )
-        st.altair_chart(chart, use_container_width=True, theme=None) # Use theme=None to respect config.toml
+        st.altair_chart(chart, use_container_width=True, theme=None)
 
     else:
         st.warning("Could not generate intent summary as no intent data was returned.")
 
-    # --- Download Buttons ---
     col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button("Download Detailed Data (CSV)", df_merged.to_csv(index=False).encode("utf-8"), "keyword_intent_details.csv", "text/csv", key="d1")
@@ -428,42 +357,3 @@ if st.session_state.results:
     cost_int = 0.001 + num_keywords * 0.0001
     approx_cost = cost_sug + cost_int
     st.caption(f"Approximate API cost for this run: ${approx_cost:.4f} for {num_keywords} keywords (estimate only).")
-
-Client/client.py
-from http.client import HTTPSConnection
-from base64 import b64encode
-from json import loads
-from json import dumps
-
-class RestClient:
-    domain = "api.dataforseo.com"
-
-    def __init__(self, username, password):
-        self.username = username
-        self.password = password
-
-    def request(self, path, method, data=None):
-        connection = HTTPSConnection(self.domain)
-        try:
-            base64_bytes = b64encode(
-                ("%s:%s" % (self.username, self.password)).encode("ascii")
-                ).decode("ascii")
-            headers = {'Authorization' : 'Basic %s' %  base64_bytes, 'Content-Encoding' : 'gzip'}
-            
-            # The official client expects a dictionary, which it converts to a JSON array string
-            if data:
-                data_str = dumps(list(data.values()))
-            else:
-                data_str = None
-
-            connection.request(method, path, headers=headers, body=data_str)
-            response = connection.getresponse()
-            return loads(response.read().decode())
-        finally:
-            connection.close()
-
-    def get(self, path):
-        return self.request(path, 'GET')
-
-    def post(self, path, data):
-        return self.request(path, 'POST', data)
