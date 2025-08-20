@@ -122,13 +122,20 @@ with st.sidebar:
         
         uploaded_keywords = []
         if pasted_keywords:
-            uploaded_keywords.extend(pasted_keywords.strip().split('\n'))
+            # FIX: Use splitlines() to handle different line endings and strip each line
+            lines = pasted_keywords.splitlines()
+            cleaned_lines = [line.strip() for line in lines if line.strip()]
+            uploaded_keywords.extend(cleaned_lines)
         if uploaded_file:
-            stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
-            # Read all lines and strip them
-            lines = [line.strip() for line in stringio.readlines()]
-            uploaded_keywords.extend(lines)
-        
+            # FIX: Use pandas to robustly read the uploaded file
+            try:
+                # We assume the keywords are in the first column, with no header
+                df_upload = pd.read_csv(uploaded_file, header=None)
+                lines = df_upload[0].dropna().astype(str).tolist()
+                uploaded_keywords.extend(lines)
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
+
         # Deduplicate
         uploaded_keywords = list(dict.fromkeys(filter(None, uploaded_keywords)))
 
@@ -421,3 +428,42 @@ if st.session_state.results:
     cost_int = 0.001 + num_keywords * 0.0001
     approx_cost = cost_sug + cost_int
     st.caption(f"Approximate API cost for this run: ${approx_cost:.4f} for {num_keywords} keywords (estimate only).")
+
+Client/client.py
+from http.client import HTTPSConnection
+from base64 import b64encode
+from json import loads
+from json import dumps
+
+class RestClient:
+    domain = "api.dataforseo.com"
+
+    def __init__(self, username, password):
+        self.username = username
+        self.password = password
+
+    def request(self, path, method, data=None):
+        connection = HTTPSConnection(self.domain)
+        try:
+            base64_bytes = b64encode(
+                ("%s:%s" % (self.username, self.password)).encode("ascii")
+                ).decode("ascii")
+            headers = {'Authorization' : 'Basic %s' %  base64_bytes, 'Content-Encoding' : 'gzip'}
+            
+            # The official client expects a dictionary, which it converts to a JSON array string
+            if data:
+                data_str = dumps(list(data.values()))
+            else:
+                data_str = None
+
+            connection.request(method, path, headers=headers, body=data_str)
+            response = connection.getresponse()
+            return loads(response.read().decode())
+        finally:
+            connection.close()
+
+    def get(self, path):
+        return self.request(path, 'GET')
+
+    def post(self, path, data):
+        return self.request(path, 'POST', data)
