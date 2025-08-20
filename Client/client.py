@@ -18,7 +18,6 @@ class RestClient:
                 ).decode("ascii")
             headers = {'Authorization' : 'Basic %s' %  base64_bytes, 'Content-Encoding' : 'gzip'}
             
-            # The official client expects a dictionary, which it converts to a JSON array string
             if data:
                 data_str = dumps(list(data.values()))
             else:
