@@ -4,9 +4,45 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+from http.client import HTTPSConnection
+from base64 import b64encode
+from json import loads
+from json import dumps
 
-from Client.client import RestClient
+# RestClient class
+class RestClient:
+    domain = "api.dataforseo.com"
 
+    def __init__(self, username, password):
+        self.username = username
+        self.password = password
+
+    def request(self, path, method, data=None):
+        connection = HTTPSConnection(self.domain)
+        try:
+            base64_bytes = b64encode(
+                ("%s:%s" % (self.username, self.password)).encode("ascii")
+            ).decode("ascii")
+            headers = {'Authorization': 'Basic %s' % base64_bytes, 'Content-Encoding': 'gzip'}
+            
+            if data:
+                data_str = dumps(list(data.values()))
+            else:
+                data_str = None
+
+            connection.request(method, path, headers=headers, body=data_str)
+            response = connection.getresponse()
+            return loads(response.read().decode())
+        finally:
+            connection.close()
+
+    def get(self, path):
+        return self.request(path, 'GET')
+
+    def post(self, path, data):
+        return self.request(path, 'POST', data)
+
+# Streamlit configuration
 st.set_page_config(page_title="Labs Keyword Ideas + Intent (Live)", layout="wide")
 st.title("DataForSEO Labs — Keyword & Intent Planner")
 
@@ -26,6 +62,7 @@ if not st.session_state.authed:
             st.error("The password you entered is incorrect.")
     st.stop()
 
+# API credentials
 DATAFORSEO_LOGIN = st.secrets.get("DATAFORSEO_LOGIN")
 DATAFORSEO_PASSWORD = st.secrets.get("DATAFORSEO_PASSWORD")
 
@@ -47,25 +84,37 @@ def make_api_post_request(endpoint: str, payload: dict) -> dict:
             return response
         else:
             st.error(f"API Error on {endpoint}: {response.get('status_message', 'Unknown error')}")
-            st.json(response)
+            if st.session_state.get('show_raw_data', False):
+                st.json(response)
             return {}
     except Exception as e:
         st.error(f"An exception occurred while calling the API endpoint {endpoint}: {e}")
         return {}
 
-def extract_items_from_response(response: dict) -> list[dict]:
+def extract_items_from_response(response: dict) -> list:
     try:
-        if response.get("tasks_error", 1) > 0:
+        if not response or response.get("tasks_error", 1) > 0:
             st.warning("The API task returned an error. See raw response for details.")
             return []
-        return response["tasks"][0]["result"]
-    except (KeyError, IndexError, TypeError):
+        
+        tasks = response.get("tasks", [])
+        if not tasks:
+            return []
+            
+        result = tasks[0].get("result")
+        if not result:
+            return []
+            
+        return result
+    except (KeyError, IndexError, TypeError) as e:
+        st.error(f"Error extracting items from response: {e}")
         return []
 
 def safe_average(series: pd.Series) -> float:
     numeric_series = pd.to_numeric(series, errors='coerce').dropna()
-    return numeric_series.mean() if not numeric_series.empty else np.nan
+    return numeric_series.mean() if not numeric_series.empty else 0.0
 
+# Sidebar inputs
 with st.sidebar:
     st.header("Inputs")
     
@@ -110,7 +159,6 @@ with st.sidebar:
         uploaded_keywords = None
         seed_keyword = None
 
-
     usd_to_gbp_rate = st.number_input("USD to GBP Exchange Rate", 0.1, 2.0, 0.79, 0.01)
 
     st.divider()
@@ -138,6 +186,7 @@ with st.sidebar:
             budget_allocations[intent] = st.number_input(f"{intent.title()} %", min_value=0, max_value=100, value=25, key=f"budget_{intent}")
 
     show_raw_data = st.toggle("Show Raw API Data (for debugging)", value=False)
+    st.session_state.show_raw_data = show_raw_data
 
 @st.cache_data(ttl=3600, show_spinner="Fetching keyword suggestions...")
 def get_keyword_suggestions(seed: str, lang_code: str, loc_name: str, limit: int) -> pd.DataFrame:
@@ -149,21 +198,42 @@ def get_keyword_suggestions(seed: str, lang_code: str, loc_name: str, limit: int
     }
     post_data = {0: payload_item}
     response = make_api_post_request("/dataforseo_labs/google/keyword_suggestions/live", post_data)
+    
+    if st.session_state.get('show_raw_data', False):
+        st.json(response)
+    
     items = extract_items_from_response(response)
     
-    if not items or 'items' not in items[0]:
+    if not items:
         return pd.DataFrame()
 
     rows = []
-    for item in items[0]['items']:
-        info = item.get("keyword_info", {})
-        cpc = info.get("cpc")
-        rows.append({
-            "keyword": item.get("keyword"),
-            "search_volume": info.get("search_volume"),
-            "cpc_usd": cpc.get("cpc") if isinstance(cpc, dict) else cpc,
-            "competition": info.get("competition"),
-        })
+    # Handle different possible response structures
+    items_data = items
+    if isinstance(items, list) and len(items) > 0:
+        if 'items' in items[0]:
+            items_data = items[0]['items']
+        else:
+            items_data = items
+
+    for item in items_data:
+        if isinstance(item, dict):
+            info = item.get("keyword_info", item)  # Some APIs return data directly
+            cpc = info.get("cpc", 0)
+            
+            # Handle different CPC formats
+            if isinstance(cpc, dict):
+                cpc_value = cpc.get("cpc", 0)
+            else:
+                cpc_value = cpc
+                
+            rows.append({
+                "keyword": item.get("keyword", ""),
+                "search_volume": info.get("search_volume", 0),
+                "cpc_usd": cpc_value,
+                "competition": info.get("competition", 0),
+            })
+    
     return pd.DataFrame(rows)
 
 @st.cache_data(ttl=3600, show_spinner="Scanning site for keywords...")
@@ -176,22 +246,37 @@ def get_keywords_from_site(url: str, lang_code: str, loc_name: str, limit: int) 
     }
     post_data = {0: payload_item}
     response = make_api_post_request("/dataforseo_labs/google/keywords_for_site/live", post_data)
+    
+    if st.session_state.get('show_raw_data', False):
+        st.json(response)
+    
     items = extract_items_from_response(response)
     
-    if not items or 'items' not in items[0]:
+    if not items:
         return pd.DataFrame()
 
     rows = []
-    for item in items[0]['items']:
-        info = item.get("keyword_data", {})
-        rows.append({
-            "keyword": item.get("keyword"),
-            "search_volume": info.get("search_volume"),
-            "cpc_usd": info.get("cpc"),
-            "competition": info.get("competition"),
-        })
-    return pd.DataFrame(rows)
+    # Handle different possible response structures
+    items_data = items
+    if isinstance(items, list) and len(items) > 0:
+        if 'items' in items[0]:
+            items_data = items[0]['items']
+        else:
+            items_data = items
 
+    for item in items_data:
+        if isinstance(item, dict):
+            # Try different possible data structures
+            info = item.get("keyword_data", item.get("keyword_info", item))
+            
+            rows.append({
+                "keyword": item.get("keyword", ""),
+                "search_volume": info.get("search_volume", 0),
+                "cpc_usd": info.get("cpc", 0),
+                "competition": info.get("competition", 0),
+            })
+    
+    return pd.DataFrame(rows)
 
 @st.cache_data(ttl=3600, show_spinner="Fetching metrics for your keywords...")
 def get_keyword_metrics(keywords: list, lang_code: str, loc_name: str) -> pd.DataFrame:
@@ -202,16 +287,22 @@ def get_keyword_metrics(keywords: list, lang_code: str, loc_name: str) -> pd.Dat
     }
     post_data = {0: payload_item}
     response = make_api_post_request("/keywords_data/google_ads/search_volume/live", post_data)
+    
+    if st.session_state.get('show_raw_data', False):
+        st.json(response)
+    
     items = extract_items_from_response(response)
 
     rows = []
     for item in items:
-        rows.append({
-            "keyword": item.get("keyword"),
-            "search_volume": item.get("search_volume"),
-            "cpc_usd": item.get("cpc"),
-            "competition": item.get("competition"),
-        })
+        if isinstance(item, dict):
+            rows.append({
+                "keyword": item.get("keyword", ""),
+                "search_volume": item.get("search_volume", 0),
+                "cpc_usd": item.get("cpc", 0),
+                "competition": item.get("competition", 0),
+            })
+    
     return pd.DataFrame(rows)
 
 @st.cache_data(ttl=3600, show_spinner="Analysing search intent...")
@@ -222,40 +313,67 @@ def get_search_intent(keywords: list, lang_code: str) -> pd.DataFrame:
     }
     post_data = {0: payload_item}
     response = make_api_post_request("/dataforseo_labs/google/search_intent/live", post_data)
+    
+    if st.session_state.get('show_raw_data', False):
+        st.json(response)
+    
     items = extract_items_from_response(response)
 
-    if not items or 'items' not in items[0]:
+    if not items:
         return pd.DataFrame()
 
     rows = []
-    for item in items[0]['items']:
-        intent_info = item.get("keyword_intent", {})
-        rows.append({
-            "keyword_clean": (item.get("keyword") or "").lower().strip(),
-            "intent": intent_info.get("label"),
-            "intent_probability": intent_info.get("probability")
-        })
+    # Handle different possible response structures
+    items_data = items
+    if isinstance(items, list) and len(items) > 0:
+        if 'items' in items[0]:
+            items_data = items[0]['items']
+        else:
+            items_data = items
+
+    for item in items_data:
+        if isinstance(item, dict):
+            intent_info = item.get("keyword_intent", {})
+            rows.append({
+                "keyword_clean": (item.get("keyword") or "").lower().strip(),
+                "intent": intent_info.get("label", "unknown"),
+                "intent_probability": intent_info.get("probability", 0)
+            })
+    
     return pd.DataFrame(rows)
 
+# Main analysis button
 if st.button("Analyse Keywords", type="primary"):
     df_metrics = pd.DataFrame()
 
-    if analysis_mode == "Generate from Seed Keyword":
+    if analysis_mode == "Generate from Seed Keyword" and seed_keyword:
         df_metrics = get_keyword_suggestions(seed_keyword, language_code, location_name, limit)
     elif analysis_mode == "Analyse My Keyword List" and uploaded_keywords:
         keyword_chunks = [uploaded_keywords[i:i + 1000] for i in range(0, len(uploaded_keywords), 1000)]
         results_list = []
         for chunk in keyword_chunks:
-            results_list.append(get_keyword_metrics(chunk, language_code, location_name))
-        df_metrics = pd.concat(results_list, ignore_index=True)
+            chunk_result = get_keyword_metrics(chunk, language_code, location_name)
+            if not chunk_result.empty:
+                results_list.append(chunk_result)
+        
+        if results_list:
+            df_metrics = pd.concat(results_list, ignore_index=True)
     elif analysis_mode == "Scan Website for Keywords" and target_url:
         df_metrics = get_keywords_from_site(target_url, language_code, location_name, limit)
-
 
     if df_metrics.empty:
         st.warning("Could not retrieve keyword metrics. Please check your inputs or try different keywords.")
         st.session_state.results = None
     else:
+        # Clean and prepare data
+        df_metrics = df_metrics.dropna(subset=['keyword'])
+        df_metrics = df_metrics[df_metrics['keyword'].str.strip() != '']
+        
+        # Ensure numeric columns are properly converted
+        df_metrics['search_volume'] = pd.to_numeric(df_metrics['search_volume'], errors='coerce').fillna(0)
+        df_metrics['cpc_usd'] = pd.to_numeric(df_metrics['cpc_usd'], errors='coerce').fillna(0)
+        df_metrics['competition'] = pd.to_numeric(df_metrics['competition'], errors='coerce').fillna(0)
+        
         df_metrics['keyword_clean'] = df_metrics['keyword'].str.lower().str.strip()
         
         intent_keywords = df_metrics['keyword_clean'].tolist()
@@ -267,34 +385,49 @@ if st.button("Analyse Keywords", type="primary"):
         else:
             df_merged = df_metrics.drop(columns=['keyword_clean'])
             df_merged['intent'] = 'unknown'
-            df_merged['intent_probability'] = None
+            df_merged['intent_probability'] = 0
 
-        st.session_state.results = {"df_merged": df_merged.dropna(subset=['keyword'])}
+        # Fill missing intents
+        df_merged['intent'] = df_merged['intent'].fillna('unknown')
+        
+        st.session_state.results = {"df_merged": df_merged}
 
+# Display results
 if st.session_state.results:
     df_merged = st.session_state.results["df_merged"]
 
-    df_merged["cpc_gbp"] = (pd.to_numeric(df_merged["cpc_usd"], errors="coerce") * usd_to_gbp_rate).round(2)
+    # Convert CPC to GBP
+    df_merged["cpc_gbp"] = (df_merged["cpc_usd"] * usd_to_gbp_rate).round(2)
+    
     st.subheader("Keyword Analysis Results")
-    st.dataframe(df_merged[['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent']], use_container_width=True)
+    display_cols = ['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent']
+    st.dataframe(df_merged[display_cols], use_container_width=True)
 
-    unmatched_keywords = df_merged[df_merged['intent'].isna()]['keyword'].tolist()
+    # Debug unmatched keywords
+    unmatched_keywords = df_merged[df_merged['intent'].isna() | (df_merged['intent'] == 'unknown')]['keyword'].tolist()
     if unmatched_keywords:
         with st.expander(f"Debug: {len(unmatched_keywords)} keywords could not be assigned an intent"):
             st.write(unmatched_keywords)
 
-    summary_df = df_merged.dropna(subset=['intent'])
+    # Create summary
+    summary_df = df_merged[df_merged['intent'] != 'unknown'].dropna(subset=['intent'])
 
-    if not summary_df.empty and 'unknown' not in summary_df['intent'].unique():
+    if not summary_df.empty:
         summary = summary_df.groupby("intent").agg(
             keywords=("keyword", "count"),
             total_volume=("search_volume", "sum"),
             avg_cpc_gbp=("cpc_gbp", safe_average),
         ).reset_index().rename(columns={"intent": "Intent"})
 
-        summary["CTR"] = summary["Intent"].map(ctrs)
-        summary["CVR"] = summary["Intent"].map(cvrs)
+        # Ensure all numeric columns are properly typed
+        summary["total_volume"] = pd.to_numeric(summary["total_volume"], errors='coerce').fillna(0)
+        summary["avg_cpc_gbp"] = pd.to_numeric(summary["avg_cpc_gbp"], errors='coerce').fillna(0)
+
+        # Add CTR and CVR
+        summary["CTR"] = summary["Intent"].map(ctrs).fillna(0.03)
+        summary["CVR"] = summary["Intent"].map(cvrs).fillna(0.015)
         
+        # Calculate metrics
         summary["Max Clicks"] = (summary["total_volume"] * summary["CTR"]).round(0)
         summary["Max Spend £"] = (summary["Max Clicks"] * summary["avg_cpc_gbp"]).round(2)
         
@@ -303,23 +436,29 @@ if st.session_state.results:
             st.sidebar.metric("Required Budget", f"£{required_budget:,.2f}")
 
         if use_custom_budget:
-            summary["Budget £"] = summary["Intent"].map(budget_allocations) * total_budget / 100
+            summary["Budget £"] = summary["Intent"].map(budget_allocations).fillna(25) * total_budget / 100
             summary["Clicks"] = np.where(
                 summary["Budget £"] < summary["Max Spend £"],
                 (summary["Budget £"] / summary["avg_cpc_gbp"]).round(0),
                 summary["Max Clicks"]
             )
-            summary["Spend £"] = summary["Clicks"] * summary["avg_cpc_gbp"]
+            summary["Spend £"] = (summary["Clicks"] * summary["avg_cpc_gbp"]).round(2)
         else:
             summary["Clicks"] = summary["Max Clicks"]
             summary["Spend £"] = summary["Max Spend £"]
 
         summary["Conversions"] = (summary["Clicks"] * summary["CVR"]).round(0)
-        summary["CPA £"] = (summary["Spend £"] / summary["Conversions"]).replace([np.inf, -np.inf], 0).round(2)
+        summary["CPA £"] = np.where(
+            summary["Conversions"] > 0,
+            (summary["Spend £"] / summary["Conversions"]).round(2),
+            0
+        )
 
         st.subheader("Grouped by Search Intent")
-        st.dataframe(summary[['Intent', 'keywords', 'total_volume', 'Clicks', 'Spend £', 'Conversions', 'CPA £']].fillna("—"), use_container_width=True)
+        display_summary = summary[['Intent', 'keywords', 'total_volume', 'Clicks', 'Spend £', 'Conversions', 'CPA £']]
+        st.dataframe(display_summary.fillna("—"), use_container_width=True)
 
+        # Blended overview
         total_keywords = summary["keywords"].sum()
         total_volume = summary["total_volume"].sum()
         total_clicks = summary["Clicks"].sum()
@@ -345,6 +484,7 @@ if st.session_state.results:
         st.subheader("Blended Overview (Weighted)")
         st.dataframe(blended_overview, use_container_width=True)
 
+        # Visualisation
         st.subheader("Performance by Intent")
         
         metric_mapping_clean = {
@@ -364,73 +504,43 @@ if st.session_state.results:
         chart_df.columns = [col.replace('£', 'GBP').replace(' ', '_') for col in chart_df.columns]
         chart_metric_col = metric_mapping_clean[chart_metric_display]
 
-        chart = alt.Chart(chart_df).mark_bar(
-            color="#48d597"
-        ).encode(
-            x=alt.X('Intent:N', sort='-y', title='Search Intent'),
-            y=alt.Y(f'{chart_metric_col}:Q', title=chart_metric_display),
-            tooltip=['Intent', alt.Tooltip(f'{chart_metric_col}:Q', title=chart_metric_display, format=',.0f')]
-        ).properties(
-            title=f'{chart_metric_display} by Search Intent'
-        ).configure_axis(
-            labelAngle=0
-        ).configure_title(
-            fontSize=16
-        )
-        st.altair_chart(chart, use_container_width=True, theme=None)
+        if chart_metric_col in chart_df.columns:
+            chart = alt.Chart(chart_df).mark_bar(
+                color="#48d597"
+            ).encode(
+                x=alt.X('Intent:N', sort='-y', title='Search Intent'),
+                y=alt.Y(f'{chart_metric_col}:Q', title=chart_metric_display),
+                tooltip=['Intent', alt.Tooltip(f'{chart_metric_col}:Q', title=chart_metric_display, format=',.0f')]
+            ).properties(
+                title=f'{chart_metric_display} by Search Intent'
+            ).configure_axis(
+                labelAngle=0
+            ).configure_title(
+                fontSize=16
+            )
+            st.altair_chart(chart, use_container_width=True, theme=None)
+
+        # Download buttons
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            csv_data = df_merged.to_csv(index=False).encode("utf-8")
+            st.download_button("Download Detailed Data (CSV)", csv_data, "keyword_intent_details.csv", "text/csv", key="d1")
+        
+        with col2:
+            summary_csv = summary.to_csv(index=False).encode("utf-8")
+            st.download_button("Download Intent Summary (CSV)", summary_csv, "intent_summary.csv", "text/csv", key="d2")
+        
+        with col3:
+            overview_csv = blended_overview.to_csv(index=False).encode("utf-8")
+            st.download_button("Download Blended Overview (CSV)", overview_csv, "blended_overview.csv", "text/csv", key="d3")
 
     else:
         st.warning("Could not generate intent summary as no intent data was returned.")
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.download_button("Download Detailed Data (CSV)", df_merged.to_csv(index=False).encode("utf-8"), "keyword_intent_details.csv", "text/csv", key="d1")
-    if not summary_df.empty and 'unknown' not in summary_df['intent'].unique():
-        with col2:
-            st.download_button("Download Intent Summary (CSV)", summary.to_csv(index=False).encode("utf-8"), "intent_summary.csv", "text/csv", key="d2")
-        with col3:
-            st.download_button("Download Blended Overview (CSV)", blended_overview.to_csv(index=False).encode("utf-8"), "blended_overview.csv", "text/csv", key="d3")
-
-    num_keywords = len(df_merged)
-    cost_sug = 0.01 + num_keywords * 0.0001
-    cost_int = 0.001 + num_keywords * 0.0001
-    approx_cost = cost_sug + cost_int
-    st.caption(f"Approximate API cost for this run: ${approx_cost:.4f} for {num_keywords} keywords (estimate only).")
-
-
-from http.client import HTTPSConnection
-from base64 import b64encode
-from json import loads
-from json import dumps
-
-class RestClient:
-    domain = "api.dataforseo.com"
-
-    def __init__(self, username, password):
-        self.username = username
-        self.password = password
-
-    def request(self, path, method, data=None):
-        connection = HTTPSConnection(self.domain)
-        try:
-            base64_bytes = b64encode(
-                ("%s:%s" % (self.username, self.password)).encode("ascii")
-                ).decode("ascii")
-            headers = {'Authorization' : 'Basic %s' %  base64_bytes, 'Content-Encoding' : 'gzip'}
-            
-            if data:
-                data_str = dumps(list(data.values()))
-            else:
-                data_str = None
-
-            connection.request(method, path, headers=headers, body=data_str)
-            response = connection.getresponse()
-            return loads(response.read().decode())
-        finally:
-            connection.close()
-
-    def get(self, path):
-        return self.request(path, 'GET')
-
-    def post(self, path, data):
-        return self.request(path, 'POST', data)
+    # Cost estimation
+    if not df_merged.empty:
+        num_keywords = len(df_merged)
+        cost_sug = 0.01 + num_keywords * 0.0001
+        cost_int = 0.001 + num_keywords * 0.0001
+        approx_cost = cost_sug + cost_int
+        st.caption(f"Approximate API cost for this run: ${approx_cost:.4f} for {num_keywords} keywords (estimate only).")
