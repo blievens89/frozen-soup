@@ -303,7 +303,7 @@ def get_keywords_from_site(url: str, lang_code: str, loc_name: str, limit: int) 
 
     rows = []
     for item in items[0]['items']:
-        info = item.get("keyword_data", {})
+        info = item.get("keyword_info", {})  # Changed from keyword_data to keyword_info
         rows.append({
             "keyword": item.get("keyword"),
             "search_volume": info.get("search_volume"),
