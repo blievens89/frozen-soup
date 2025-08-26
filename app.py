@@ -71,7 +71,7 @@ with st.sidebar:
     
     analysis_mode = st.radio(
         "Analysis Mode",
-        ("Generate from Seed Keyword", "Analyse My Keyword List"),
+        ("Generate from Seed Keyword", "Analyse My Keyword List", "Scan Website for Keywords"),
         key="analysis_mode"
     )
 
@@ -82,7 +82,8 @@ with st.sidebar:
         seed_keyword = st.text_input("Seed Keyword", value="remortgage")
         limit = st.slider("Max Keyword Ideas", 10, 300, 50, step=10)
         uploaded_keywords = None
-    else:
+        target_url = None
+    elif analysis_mode == "Analyse My Keyword List":
         st.subheader("Your Keywords")
         pasted_keywords = st.text_area("Paste keywords here (one per line)")
         uploaded_file = st.file_uploader("Or upload a TXT/CSV file", type=['txt', 'csv'])
@@ -101,6 +102,14 @@ with st.sidebar:
                 st.error(f"Error reading file: {e}")
 
         uploaded_keywords = list(dict.fromkeys(filter(None, uploaded_keywords)))
+        seed_keyword = None
+        target_url = None
+    else: # Scan Website
+        target_url = st.text_input("Enter URL to scan", value="https://www.gov.uk/remortgaging-your-home")
+        limit = st.slider("Max Keyword Ideas", 10, 300, 50, step=10)
+        uploaded_keywords = None
+        seed_keyword = None
+
 
     usd_to_gbp_rate = st.number_input("USD to GBP Exchange Rate", 0.1, 2.0, 0.79, 0.01)
 
@@ -157,6 +166,33 @@ def get_keyword_suggestions(seed: str, lang_code: str, loc_name: str, limit: int
         })
     return pd.DataFrame(rows)
 
+@st.cache_data(ttl=3600, show_spinner="Scanning site for keywords...")
+def get_keywords_from_site(url: str, lang_code: str, loc_name: str, limit: int) -> pd.DataFrame:
+    payload_item = {
+        "target": url.strip(),
+        "language_code": lang_code.strip(),
+        "location_name": loc_name.strip(),
+        "limit": limit,
+    }
+    post_data = {0: payload_item}
+    response = make_api_post_request("/dataforseo_labs/google/keywords_for_site/live", post_data)
+    items = extract_items_from_response(response)
+    
+    if not items or 'items' not in items[0]:
+        return pd.DataFrame()
+
+    rows = []
+    for item in items[0]['items']:
+        info = item.get("keyword_data", {})
+        rows.append({
+            "keyword": item.get("keyword"),
+            "search_volume": info.get("search_volume"),
+            "cpc_usd": info.get("cpc"),
+            "competition": info.get("competition"),
+        })
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=3600, show_spinner="Fetching metrics for your keywords...")
 def get_keyword_metrics(keywords: list, lang_code: str, loc_name: str) -> pd.DataFrame:
     payload_item = {
@@ -206,12 +242,15 @@ if st.button("Analyse Keywords", type="primary"):
 
     if analysis_mode == "Generate from Seed Keyword":
         df_metrics = get_keyword_suggestions(seed_keyword, language_code, location_name, limit)
-    elif uploaded_keywords:
+    elif analysis_mode == "Analyse My Keyword List" and uploaded_keywords:
         keyword_chunks = [uploaded_keywords[i:i + 1000] for i in range(0, len(uploaded_keywords), 1000)]
         results_list = []
         for chunk in keyword_chunks:
             results_list.append(get_keyword_metrics(chunk, language_code, location_name))
         df_metrics = pd.concat(results_list, ignore_index=True)
+    elif analysis_mode == "Scan Website for Keywords" and target_url:
+        df_metrics = get_keywords_from_site(target_url, language_code, location_name, limit)
+
 
     if df_metrics.empty:
         st.warning("Could not retrieve keyword metrics. Please check your inputs or try different keywords.")
@@ -357,3 +396,41 @@ if st.session_state.results:
     cost_int = 0.001 + num_keywords * 0.0001
     approx_cost = cost_sug + cost_int
     st.caption(f"Approximate API cost for this run: ${approx_cost:.4f} for {num_keywords} keywords (estimate only).")
+
+Client/client.py
+from http.client import HTTPSConnection
+from base64 import b64encode
+from json import loads
+from json import dumps
+
+class RestClient:
+    domain = "api.dataforseo.com"
+
+    def __init__(self, username, password):
+        self.username = username
+        self.password = password
+
+    def request(self, path, method, data=None):
+        connection = HTTPSConnection(self.domain)
+        try:
+            base64_bytes = b64encode(
+                ("%s:%s" % (self.username, self.password)).encode("ascii")
+                ).decode("ascii")
+            headers = {'Authorization' : 'Basic %s' %  base64_bytes, 'Content-Encoding' : 'gzip'}
+            
+            if data:
+                data_str = dumps(list(data.values()))
+            else:
+                data_str = None
+
+            connection.request(method, path, headers=headers, body=data_str)
+            response = connection.getresponse()
+            return loads(response.read().decode())
+        finally:
+            connection.close()
+
+    def get(self, path):
+        return self.request(path, 'GET')
+
+    def post(self, path, data):
+        return self.request(path, 'POST', data)
