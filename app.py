@@ -296,20 +296,93 @@ def get_keywords_from_site(url: str, lang_code: str, loc_name: str, limit: int) 
     }
     post_data = {0: payload_item}
     response = make_api_post_request("/dataforseo_labs/google/keywords_for_site/live", post_data)
+    
+    if st.session_state.get('show_raw_data', False):
+        st.json(response)
+    
     items = extract_items_from_response(response)
     
-    if not items or 'items' not in items[0]:
+    if not items:
+        st.warning("No data returned from keywords for site API")
         return pd.DataFrame()
 
     rows = []
-    for item in items[0]['items']:
-        info = item.get("keyword_info", {})  # Changed from keyword_data to keyword_info
-        rows.append({
-            "keyword": item.get("keyword"),
-            "search_volume": info.get("search_volume"),
-            "cpc_usd": info.get("cpc"),
-            "competition": info.get("competition"),
-        })
+    try:
+        # Debug: Check what we actually got
+        if st.session_state.get('show_raw_data', False):
+            st.write("Items structure:", type(items))
+            st.write("Items content:", items)
+        
+        # Handle different possible response structures
+        items_data = None
+        
+        if isinstance(items, list):
+            if len(items) > 0:
+                first_item = items[0]
+                if isinstance(first_item, dict):
+                    if 'items' in first_item:
+                        items_data = first_item['items']
+                    elif 'keyword' in first_item:  # Direct keyword data
+                        items_data = items
+                    else:
+                        # Look for other possible data containers
+                        for key in ['data', 'results', 'keywords']:
+                            if key in first_item:
+                                items_data = first_item[key]
+                                break
+                else:
+                    items_data = items
+            else:
+                items_data = []
+        elif isinstance(items, dict):
+            # If items is a dict, look for keyword data
+            if 'items' in items:
+                items_data = items['items']
+            elif 'data' in items:
+                items_data = items['data']
+            elif 'results' in items:
+                items_data = items['results']
+            else:
+                # Treat the dict as a single item
+                items_data = [items]
+        else:
+            st.error(f"Unexpected items type: {type(items)}")
+            return pd.DataFrame()
+
+        if items_data is None or not items_data:
+            st.warning("No keyword data found in API response")
+            return pd.DataFrame()
+
+        # Ensure items_data is iterable
+        if not hasattr(items_data, '__iter__'):
+            st.error(f"Items data is not iterable: {type(items_data)}")
+            return pd.DataFrame()
+
+        for item in items_data:
+            if isinstance(item, dict):
+                # Try different possible field names for keyword info
+                info = item.get("keyword_info", item.get("keyword_data", item))
+                
+                # Handle different CPC formats
+                cpc = info.get("cpc", 0)
+                if isinstance(cpc, dict):
+                    cpc_value = cpc.get("cpc", 0)
+                else:
+                    cpc_value = cpc
+                    
+                rows.append({
+                    "keyword": item.get("keyword", ""),
+                    "search_volume": info.get("search_volume", 0),
+                    "cpc_usd": cpc_value,
+                    "competition": info.get("competition", 0),
+                })
+    
+    except Exception as e:
+        st.error(f"Error processing keywords from site response: {e}")
+        if st.session_state.get('show_raw_data', False):
+            st.write("Raw items:", items)
+        return pd.DataFrame()
+    
     return pd.DataFrame(rows)
 
 @st.cache_data(ttl=3600, show_spinner="Fetching metrics for your keywords...")
