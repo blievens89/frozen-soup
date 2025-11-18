@@ -1,5 +1,10 @@
 import os
 import io
+import time
+import json
+import re
+from datetime import datetime
+from collections import defaultdict
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -17,30 +22,209 @@ class RestClient:
         self.username = username
         self.password = password
 
-    def request(self, path, method, data=None):
-        connection = HTTPSConnection(self.domain)
-        try:
-            base64_bytes = b64encode(
-                ("%s:%s" % (self.username, self.password)).encode("ascii")
-            ).decode("ascii")
-            headers = {'Authorization': 'Basic %s' % base64_bytes, 'Content-Encoding': 'gzip'}
-            
-            if data:
-                data_str = dumps(list(data.values()))
-            else:
-                data_str = None
+    def request(self, path, method, data=None, max_retries=3):
+        """Make API request with retry logic"""
+        for attempt in range(max_retries):
+            connection = HTTPSConnection(self.domain)
+            try:
+                base64_bytes = b64encode(
+                    ("%s:%s" % (self.username, self.password)).encode("ascii")
+                ).decode("ascii")
+                headers = {'Authorization': 'Basic %s' % base64_bytes, 'Content-Encoding': 'gzip'}
 
-            connection.request(method, path, headers=headers, body=data_str)
-            response = connection.getresponse()
-            return loads(response.read().decode())
-        finally:
-            connection.close()
+                if data:
+                    data_str = dumps(list(data.values()))
+                else:
+                    data_str = None
+
+                connection.request(method, path, headers=headers, body=data_str)
+                response = connection.getresponse()
+                return loads(response.read().decode())
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise e
+            finally:
+                connection.close()
 
     def get(self, path):
         return self.request(path, 'GET')
 
     def post(self, path, data):
         return self.request(path, 'POST', data)
+
+# ============================================
+# HELPER FUNCTIONS FOR ANALYSIS
+# ============================================
+
+def calculate_keyword_difficulty(competition, cpc):
+    """Calculate keyword difficulty score (0-100)"""
+    # Higher competition and CPC = higher difficulty
+    comp_score = competition * 50  # 0-1 scale to 0-50
+    cpc_normalized = min(cpc / 10, 1) * 50  # Normalize CPC, cap at £10 for max score
+    return min(comp_score + cpc_normalized, 100)
+
+def calculate_opportunity_score(search_volume, cpc, competition, intent):
+    """Calculate opportunity score (0-100) - higher is better"""
+    # High volume, reasonable CPC, lower competition = high opportunity
+    intent_multiplier = {
+        'transactional': 1.2,
+        'commercial': 1.1,
+        'navigational': 0.9,
+        'informational': 0.8,
+        'unknown': 0.7
+    }.get(intent, 0.7)
+
+    # Normalize search volume (log scale)
+    volume_score = min(np.log10(search_volume + 1) / 5, 1) * 40
+
+    # CPC sweet spot: £0.50-£3.00 is ideal
+    if 0.5 <= cpc <= 3.0:
+        cpc_score = 30
+    elif cpc < 0.5:
+        cpc_score = 15 * (cpc / 0.5)  # Lower is less valuable
+    else:
+        cpc_score = 30 * (1 / (1 + (cpc - 3.0) / 3))  # Higher diminishes value
+
+    # Lower competition is better
+    competition_score = (1 - competition) * 30
+
+    raw_score = (volume_score + cpc_score + competition_score) * intent_multiplier
+    return min(raw_score, 100)
+
+def group_keywords_by_similarity(keywords_df):
+    """Group keywords by common themes/words"""
+    groups = defaultdict(list)
+
+    for idx, row in keywords_df.iterrows():
+        keyword = row['keyword'].lower()
+        words = set(re.findall(r'\b\w+\b', keyword))
+
+        # Remove common stop words
+        stop_words = {'a', 'an', 'the', 'is', 'are', 'was', 'were', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+        words = words - stop_words
+
+        # Find best matching group or create new one
+        best_group = None
+        best_overlap = 0
+
+        for group_key, group_keywords in groups.items():
+            group_words = set(re.findall(r'\b\w+\b', group_key))
+            overlap = len(words & group_words)
+            if overlap > best_overlap and overlap >= len(words) * 0.5:
+                best_overlap = overlap
+                best_group = group_key
+
+        if best_group:
+            groups[best_group].append(keyword)
+        else:
+            # Use the most common word as group key
+            if words:
+                key = sorted(words, key=len, reverse=True)[0]
+                groups[key].append(keyword)
+
+    # Assign group names to dataframe
+    keyword_to_group = {}
+    for group_name, kw_list in groups.items():
+        for kw in kw_list:
+            keyword_to_group[kw] = group_name.title()
+
+    keywords_df['keyword_group'] = keywords_df['keyword'].str.lower().map(keyword_to_group).fillna('Other')
+    return keywords_df
+
+def suggest_negative_keywords(keywords_df):
+    """Suggest potential negative keywords based on low intent/high cost/low volume"""
+    negatives = []
+
+    for idx, row in keywords_df.iterrows():
+        keyword = row['keyword']
+        reasons = []
+
+        # Low search volume
+        if row.get('search_volume', 0) < 10:
+            reasons.append('very low search volume (<10)')
+
+        # Informational with high CPC
+        if row.get('intent') == 'informational' and row.get('cpc_gbp', 0) > 1.5:
+            reasons.append('informational intent with high CPC')
+
+        # Very high competition with low volume
+        if row.get('competition', 0) > 0.8 and row.get('search_volume', 0) < 50:
+            reasons.append('high competition, low volume')
+
+        # Check for common negative indicators
+        negative_indicators = ['free', 'cheap', 'job', 'jobs', 'career', 'salary', 'course', 'training', 'diy', 'how to make']
+        keyword_lower = keyword.lower()
+        for indicator in negative_indicators:
+            if indicator in keyword_lower and row.get('intent') != 'transactional':
+                reasons.append(f'contains "{indicator}"')
+                break
+
+        if reasons:
+            negatives.append({
+                'keyword': keyword,
+                'reason': '; '.join(reasons),
+                'search_volume': row.get('search_volume', 0),
+                'cpc_gbp': row.get('cpc_gbp', 0),
+                'intent': row.get('intent', 'unknown')
+            })
+
+    return pd.DataFrame(negatives) if negatives else pd.DataFrame()
+
+def calculate_roi_metrics(df, avg_order_value, profit_margin):
+    """Calculate ROI metrics with revenue projections"""
+    df = df.copy()
+
+    # Revenue per conversion
+    df['revenue_per_conversion'] = avg_order_value
+    df['profit_per_conversion'] = avg_order_value * profit_margin
+
+    # Total revenue and profit
+    df['total_revenue'] = df['Conversions'] * df['revenue_per_conversion']
+    df['total_profit'] = df['Conversions'] * df['profit_per_conversion']
+
+    # ROI and ROAS
+    df['ROI'] = np.where(
+        df['Spend £'] > 0,
+        ((df['total_profit'] - df['Spend £']) / df['Spend £'] * 100).round(2),
+        0
+    )
+    df['ROAS'] = np.where(
+        df['Spend £'] > 0,
+        (df['total_revenue'] / df['Spend £']).round(2),
+        0
+    )
+
+    return df
+
+def optimize_budget_allocation(summary_df, total_budget):
+    """Optimize budget allocation based on expected ROAS/CPA"""
+    # Use CPA as inverse weight - lower CPA gets more budget
+    summary_df = summary_df.copy()
+
+    # Calculate efficiency score (inverse of CPA, normalized)
+    min_cpa = summary_df['CPA £'].replace(0, np.inf).min()
+    summary_df['efficiency'] = np.where(
+        summary_df['CPA £'] > 0,
+        min_cpa / summary_df['CPA £'],
+        0
+    )
+
+    total_efficiency = summary_df['efficiency'].sum()
+
+    if total_efficiency > 0:
+        summary_df['optimized_budget_pct'] = (summary_df['efficiency'] / total_efficiency * 100).round(1)
+        summary_df['optimized_budget'] = (summary_df['optimized_budget_pct'] * total_budget / 100).round(2)
+    else:
+        # Equal distribution if we can't calculate efficiency
+        n_intents = len(summary_df)
+        summary_df['optimized_budget_pct'] = 100 / n_intents
+        summary_df['optimized_budget'] = total_budget / n_intents
+
+    return summary_df
 
 # Streamlit configuration
 st.set_page_config(page_title="Labs Keyword Ideas + Intent (Live)", layout="wide")
@@ -175,16 +359,48 @@ with st.sidebar:
             cvrs[intent] = st.number_input(f"{intent.title()} CVR", 0.0, 1.0, cvr_defaults[intent], 0.005, format="%.3f", key=f"cvr_{intent}")
 
     st.divider()
-    st.header("Budgeting")
+    st.header("Advanced Filters")
+    enable_filters = st.toggle("Enable Filtering", value=False)
+
+    if enable_filters:
+        min_search_volume = st.number_input("Min Search Volume", min_value=0, value=10, step=10)
+        max_search_volume = st.number_input("Max Search Volume (0 = no limit)", min_value=0, value=0, step=100)
+
+        min_cpc = st.number_input("Min CPC (£)", min_value=0.0, value=0.0, step=0.1, format="%.2f")
+        max_cpc = st.number_input("Max CPC (£, 0 = no limit)", min_value=0.0, value=0.0, step=0.5, format="%.2f")
+
+        min_competition = st.slider("Min Competition", 0.0, 1.0, 0.0, 0.1)
+        max_competition = st.slider("Max Competition", 0.0, 1.0, 1.0, 0.1)
+
+        intent_filter = st.multiselect("Filter by Intent", intents + ['unknown'], default=[])
+    else:
+        min_search_volume = 0
+        max_search_volume = 0
+        min_cpc = 0.0
+        max_cpc = 0.0
+        min_competition = 0.0
+        max_competition = 1.0
+        intent_filter = []
+
+    st.divider()
+    st.header("Budgeting & ROI")
     use_custom_budget = st.toggle("Set Custom Budget", value=False)
     if use_custom_budget:
         total_budget = st.number_input("Total Monthly Budget (£)", min_value=0.0, value=1000.0, step=100.0)
         st.caption("Allocate budget by intent (%)")
-        
+
         budget_allocations = {}
         for intent in intents:
             budget_allocations[intent] = st.number_input(f"{intent.title()} %", min_value=0, max_value=100, value=25, key=f"budget_{intent}")
 
+    enable_roi_calc = st.toggle("Enable ROI Calculator", value=False)
+    if enable_roi_calc:
+        avg_order_value = st.number_input("Average Order Value (£)", min_value=0.0, value=100.0, step=10.0)
+        profit_margin = st.slider("Profit Margin (%)", 0, 100, 30, 5) / 100
+
+    show_budget_optimization = st.toggle("Show Budget Optimization", value=False)
+
+    st.divider()
     show_raw_data = st.toggle("Show Raw API Data (for debugging)", value=False)
     st.session_state.show_raw_data = show_raw_data
 
@@ -501,14 +717,150 @@ if st.button("Analyse Keywords", type="primary"):
 
 # Display results
 if st.session_state.results:
-    df_merged = st.session_state.results["df_merged"]
+    df_merged = st.session_state.results["df_merged"].copy()
 
     # Convert CPC to GBP
     df_merged["cpc_gbp"] = (df_merged["cpc_usd"] * usd_to_gbp_rate).round(2)
-    
+
+    # Apply filters if enabled
+    if enable_filters:
+        original_count = len(df_merged)
+
+        # Search volume filters
+        df_merged = df_merged[df_merged['search_volume'] >= min_search_volume]
+        if max_search_volume > 0:
+            df_merged = df_merged[df_merged['search_volume'] <= max_search_volume]
+
+        # CPC filters
+        df_merged = df_merged[df_merged['cpc_gbp'] >= min_cpc]
+        if max_cpc > 0:
+            df_merged = df_merged[df_merged['cpc_gbp'] <= max_cpc]
+
+        # Competition filters
+        df_merged = df_merged[df_merged['competition'] >= min_competition]
+        df_merged = df_merged[df_merged['competition'] <= max_competition]
+
+        # Intent filter
+        if intent_filter:
+            df_merged = df_merged[df_merged['intent'].isin(intent_filter)]
+
+        filtered_count = len(df_merged)
+        if filtered_count < original_count:
+            st.info(f"Filters applied: {original_count - filtered_count} keywords removed, {filtered_count} remaining")
+
+    # Calculate keyword difficulty and opportunity scores
+    df_merged['difficulty_score'] = df_merged.apply(
+        lambda row: calculate_keyword_difficulty(row['competition'], row['cpc_gbp']), axis=1
+    ).round(1)
+
+    df_merged['opportunity_score'] = df_merged.apply(
+        lambda row: calculate_opportunity_score(
+            row['search_volume'], row['cpc_gbp'], row['competition'], row.get('intent', 'unknown')
+        ), axis=1
+    ).round(1)
+
+    # Add keyword grouping
+    df_merged = group_keywords_by_similarity(df_merged)
+
     st.subheader("Keyword Analysis Results")
-    display_cols = ['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent']
-    st.dataframe(df_merged[display_cols], use_container_width=True)
+
+    # Top-level metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Keywords", f"{len(df_merged):,}")
+    with col2:
+        avg_difficulty = df_merged['difficulty_score'].mean()
+        st.metric("Avg Difficulty", f"{avg_difficulty:.1f}/100")
+    with col3:
+        avg_opportunity = df_merged['opportunity_score'].mean()
+        st.metric("Avg Opportunity", f"{avg_opportunity:.1f}/100")
+    with col4:
+        total_vol = df_merged['search_volume'].sum()
+        st.metric("Total Volume", f"{total_vol:,}")
+
+    display_cols = ['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent', 'difficulty_score', 'opportunity_score', 'keyword_group']
+    st.dataframe(df_merged[display_cols].sort_values('opportunity_score', ascending=False), use_container_width=True, height=400)
+
+    # Quick Wins Section
+    st.divider()
+    st.subheader("Quick Wins - Low-Hanging Fruit")
+
+    # Define quick wins: High opportunity (>60), Low difficulty (<40)
+    quick_wins = df_merged[
+        (df_merged['opportunity_score'] >= 60) &
+        (df_merged['difficulty_score'] <= 40)
+    ].sort_values('opportunity_score', ascending=False)
+
+    if not quick_wins.empty:
+        qw_col1, qw_col2 = st.columns([2, 1])
+
+        with qw_col1:
+            st.success(f"Found {len(quick_wins)} high-opportunity, low-difficulty keywords!")
+            st.dataframe(
+                quick_wins[['keyword', 'search_volume', 'cpc_gbp', 'intent', 'opportunity_score', 'difficulty_score']].head(20),
+                use_container_width=True
+            )
+
+        with qw_col2:
+            qw_metrics = quick_wins.agg({
+                'search_volume': 'sum',
+                'cpc_gbp': 'mean'
+            })
+
+            st.metric("Total Volume", f"{int(qw_metrics['search_volume']):,}")
+            st.metric("Avg CPC", f"£{qw_metrics['cpc_gbp']:.2f}")
+
+            # Estimate potential impact
+            estimated_clicks = qw_metrics['search_volume'] * 0.03  # Conservative 3% CTR
+            estimated_cost = estimated_clicks * qw_metrics['cpc_gbp']
+            st.metric("Est. Monthly Clicks", f"{int(estimated_clicks):,}")
+            st.metric("Est. Monthly Cost", f"£{estimated_cost:,.2f}")
+
+        quick_wins_csv = quick_wins.to_csv(index=False).encode("utf-8")
+        st.download_button("Download Quick Wins (CSV)", quick_wins_csv, "quick_wins_keywords.csv", "text/csv", key="qw_download")
+    else:
+        st.info("No quick wins identified with current filters. Try adjusting your criteria or filters.")
+
+    # Competitive Insights
+    st.divider()
+    st.subheader("Competitive Insights")
+
+    comp_col1, comp_col2 = st.columns(2)
+
+    with comp_col1:
+        # High volume, high competition keywords (competitive battlefield)
+        competitive_keywords = df_merged[
+            (df_merged['search_volume'] >= df_merged['search_volume'].quantile(0.75)) &
+            (df_merged['competition'] >= 0.7)
+        ].sort_values('search_volume', ascending=False).head(10)
+
+        st.write("**Highly Competitive Keywords** (High volume, High competition)")
+        st.caption("These keywords are competitive but have significant traffic potential")
+        if not competitive_keywords.empty:
+            st.dataframe(
+                competitive_keywords[['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent']],
+                use_container_width=True
+            )
+        else:
+            st.info("No highly competitive keywords found")
+
+    with comp_col2:
+        # Low competition gems
+        low_comp_gems = df_merged[
+            (df_merged['search_volume'] >= 50) &
+            (df_merged['competition'] <= 0.3) &
+            (df_merged['cpc_gbp'] >= 0.5)
+        ].sort_values('search_volume', ascending=False).head(10)
+
+        st.write("**Low Competition Gems** (Decent volume, Low competition)")
+        st.caption("Easier to rank for with meaningful traffic")
+        if not low_comp_gems.empty:
+            st.dataframe(
+                low_comp_gems[['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent']],
+                use_container_width=True
+            )
+        else:
+            st.info("No low competition gems found")
 
     # Debug unmatched keywords
     unmatched_keywords = df_merged[df_merged['intent'].isna() | (df_merged['intent'] == 'unknown')]['keyword'].tolist()
@@ -561,9 +913,40 @@ if st.session_state.results:
             0
         )
 
+        # Add ROI metrics if enabled
+        if enable_roi_calc:
+            summary = calculate_roi_metrics(summary, avg_order_value, profit_margin)
+
         st.subheader("Grouped by Search Intent")
-        display_summary = summary[['Intent', 'keywords', 'total_volume', 'Clicks', 'Spend £', 'Conversions', 'CPA £']]
+
+        if enable_roi_calc:
+            display_summary = summary[['Intent', 'keywords', 'total_volume', 'Clicks', 'Spend £', 'Conversions', 'CPA £', 'total_revenue', 'total_profit', 'ROAS', 'ROI']]
+            display_summary = display_summary.rename(columns={
+                'total_revenue': 'Revenue £',
+                'total_profit': 'Profit £',
+                'ROAS': 'ROAS',
+                'ROI': 'ROI %'
+            })
+        else:
+            display_summary = summary[['Intent', 'keywords', 'total_volume', 'Clicks', 'Spend £', 'Conversions', 'CPA £']]
+
         st.dataframe(display_summary.fillna("—"), use_container_width=True)
+
+        # Show budget optimization if enabled
+        if show_budget_optimization and use_custom_budget:
+            st.subheader("Budget Optimization Recommendations")
+            optimized = optimize_budget_allocation(summary, total_budget)
+
+            st.write("**Current vs Optimized Allocation:**")
+            comparison_df = optimized[['Intent', 'Budget £', 'optimized_budget', 'CPA £']].copy()
+            comparison_df = comparison_df.rename(columns={
+                'Budget £': 'Current Budget £',
+                'optimized_budget': 'Recommended Budget £',
+                'CPA £': 'Expected CPA £'
+            })
+            st.dataframe(comparison_df, use_container_width=True)
+
+            st.info("Optimized budget allocation is based on inverse CPA - intents with lower CPA receive more budget for better efficiency.")
 
         # Blended overview
         total_keywords = summary["keywords"].sum()
@@ -591,55 +974,203 @@ if st.session_state.results:
         st.subheader("Blended Overview (Weighted)")
         st.dataframe(blended_overview, use_container_width=True)
 
+        # Add ROI to blended overview if enabled
+        if enable_roi_calc:
+            total_revenue = summary['total_revenue'].sum() if 'total_revenue' in summary.columns else 0
+            total_profit = summary['total_profit'].sum() if 'total_profit' in summary.columns else 0
+            blended_roas = total_revenue / total_spend if total_spend > 0 else 0
+            blended_roi = ((total_profit - total_spend) / total_spend * 100) if total_spend > 0 else 0
+
+            roi_cols = st.columns(4)
+            with roi_cols[0]:
+                st.metric("Total Revenue", f"£{total_revenue:,.2f}")
+            with roi_cols[1]:
+                st.metric("Total Profit", f"£{total_profit:,.2f}")
+            with roi_cols[2]:
+                st.metric("ROAS", f"{blended_roas:.2f}")
+            with roi_cols[3]:
+                st.metric("ROI", f"{blended_roi:.1f}%")
+
+        # Negative keywords suggestions
+        st.divider()
+        with st.expander("View Negative Keyword Suggestions", expanded=False):
+            df_negatives = suggest_negative_keywords(df_merged)
+            if not df_negatives.empty:
+                st.write(f"Found {len(df_negatives)} keywords that may be good negative keyword candidates:")
+                st.dataframe(df_negatives, use_container_width=True)
+
+                neg_csv = df_negatives.to_csv(index=False).encode("utf-8")
+                st.download_button("Download Negative Keywords (CSV)", neg_csv, "negative_keywords.csv", "text/csv", key="neg_download")
+            else:
+                st.success("No obvious negative keyword candidates found in your list!")
+
+        # Keyword Groups Analysis
+        st.divider()
+        with st.expander("View Keyword Groups (for Ad Group Creation)", expanded=False):
+            group_analysis = df_merged.groupby('keyword_group').agg({
+                'keyword': 'count',
+                'search_volume': 'sum',
+                'cpc_gbp': 'mean',
+                'opportunity_score': 'mean'
+            }).reset_index()
+            group_analysis.columns = ['Keyword Group', 'Keywords', 'Total Volume', 'Avg CPC £', 'Avg Opportunity']
+            group_analysis = group_analysis.sort_values('Total Volume', ascending=False)
+
+            st.write("Keywords grouped by common themes:")
+            st.dataframe(group_analysis, use_container_width=True)
+
+            # Show keywords in each group
+            selected_group = st.selectbox("View keywords in group:", group_analysis['Keyword Group'].tolist())
+            if selected_group:
+                group_keywords = df_merged[df_merged['keyword_group'] == selected_group][['keyword', 'search_volume', 'cpc_gbp', 'intent', 'opportunity_score']]
+                st.dataframe(group_keywords.sort_values('opportunity_score', ascending=False), use_container_width=True)
+
         # Visualisation
-        st.subheader("Performance by Intent")
-        
-        metric_mapping_clean = {
-            "Total Volume": "total_volume",
-            "Clicks": "Clicks",
-            "Spend (£)": "Spend_GBP",
-            "Conversions": "Conversions",
-            "CPA (£)": "CPA_GBP"
-        }
+        st.divider()
+        st.subheader("Data Visualizations")
 
-        chart_metric_display = st.selectbox(
-            "Choose a metric to visualise",
-            list(metric_mapping_clean.keys())
-        )
-        
-        chart_df = summary.copy()
-        chart_df.columns = [col.replace('£', 'GBP').replace(' ', '_') for col in chart_df.columns]
-        chart_metric_col = metric_mapping_clean[chart_metric_display]
+        viz_tabs = st.tabs(["Intent Performance", "Opportunity Analysis", "Keyword Distribution"])
 
-        if chart_metric_col in chart_df.columns:
-            chart = alt.Chart(chart_df).mark_bar(
-                color="#48d597"
-            ).encode(
-                x=alt.X('Intent:N', sort='-y', title='Search Intent'),
-                y=alt.Y(f'{chart_metric_col}:Q', title=chart_metric_display),
-                tooltip=['Intent', alt.Tooltip(f'{chart_metric_col}:Q', title=chart_metric_display, format=',.0f')]
-            ).properties(
-                title=f'{chart_metric_display} by Search Intent'
-            ).configure_axis(
-                labelAngle=0
-            ).configure_title(
-                fontSize=16
+        with viz_tabs[0]:
+            metric_mapping_clean = {
+                "Total Volume": "total_volume",
+                "Clicks": "Clicks",
+                "Spend (£)": "Spend_GBP",
+                "Conversions": "Conversions",
+                "CPA (£)": "CPA_GBP"
+            }
+
+            if enable_roi_calc:
+                metric_mapping_clean.update({
+                    "Revenue (£)": "total_revenue",
+                    "ROAS": "ROAS",
+                    "ROI (%)": "ROI"
+                })
+
+            chart_metric_display = st.selectbox(
+                "Choose a metric to visualise",
+                list(metric_mapping_clean.keys())
             )
-            st.altair_chart(chart, use_container_width=True, theme=None)
+
+            chart_df = summary.copy()
+            chart_df.columns = [col.replace('£', 'GBP').replace(' ', '_') for col in chart_df.columns]
+            chart_metric_col = metric_mapping_clean[chart_metric_display]
+
+            if chart_metric_col in chart_df.columns:
+                chart = alt.Chart(chart_df).mark_bar(
+                    color="#48d597"
+                ).encode(
+                    x=alt.X('Intent:N', sort='-y', title='Search Intent'),
+                    y=alt.Y(f'{chart_metric_col}:Q', title=chart_metric_display),
+                    tooltip=['Intent', alt.Tooltip(f'{chart_metric_col}:Q', title=chart_metric_display, format=',.0f')]
+                ).properties(
+                    title=f'{chart_metric_display} by Search Intent'
+                ).configure_axis(
+                    labelAngle=0
+                ).configure_title(
+                    fontSize=16
+                )
+                st.altair_chart(chart, use_container_width=True, theme=None)
+
+        with viz_tabs[1]:
+            # Opportunity vs Difficulty Scatter Plot
+            st.write("**Opportunity vs Difficulty Analysis**")
+            st.caption("Top-right quadrant = High opportunity, High difficulty | Top-left = High opportunity, Low difficulty (Sweet spot!)")
+
+            scatter_data = df_merged[['keyword', 'opportunity_score', 'difficulty_score', 'search_volume', 'cpc_gbp', 'intent']].copy()
+
+            scatter = alt.Chart(scatter_data).mark_circle(size=60).encode(
+                x=alt.X('difficulty_score:Q', title='Difficulty Score', scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y('opportunity_score:Q', title='Opportunity Score', scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color('intent:N', title='Intent'),
+                size=alt.Size('search_volume:Q', title='Search Volume', scale=alt.Scale(range=[50, 500])),
+                tooltip=['keyword', 'opportunity_score', 'difficulty_score', 'search_volume', 'cpc_gbp', 'intent']
+            ).properties(
+                width=700,
+                height=500,
+                title='Keyword Opportunity vs Difficulty'
+            ).interactive()
+
+            # Add quadrant lines
+            h_line = alt.Chart(pd.DataFrame({'y': [50]})).mark_rule(strokeDash=[5, 5], color='gray').encode(y='y:Q')
+            v_line = alt.Chart(pd.DataFrame({'x': [50]})).mark_rule(strokeDash=[5, 5], color='gray').encode(x='x:Q')
+
+            st.altair_chart(scatter + h_line + v_line, use_container_width=True, theme=None)
+
+            # Top opportunities
+            st.write("**Top 10 High-Opportunity Keywords**")
+            top_opps = df_merged.nlargest(10, 'opportunity_score')[['keyword', 'search_volume', 'cpc_gbp', 'difficulty_score', 'opportunity_score', 'intent']]
+            st.dataframe(top_opps, use_container_width=True)
+
+        with viz_tabs[2]:
+            # Distribution charts
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.write("**Search Volume Distribution**")
+                vol_chart = alt.Chart(df_merged).mark_bar(color="#48d597").encode(
+                    alt.X('search_volume:Q', bin=alt.Bin(maxbins=20), title='Search Volume'),
+                    alt.Y('count():Q', title='Number of Keywords')
+                ).properties(height=300)
+                st.altair_chart(vol_chart, use_container_width=True, theme=None)
+
+            with col2:
+                st.write("**CPC Distribution**")
+                cpc_chart = alt.Chart(df_merged).mark_bar(color="#48d597").encode(
+                    alt.X('cpc_gbp:Q', bin=alt.Bin(maxbins=20), title='CPC (£)'),
+                    alt.Y('count():Q', title='Number of Keywords')
+                ).properties(height=300)
+                st.altair_chart(cpc_chart, use_container_width=True, theme=None)
+
+            st.write("**Intent Distribution**")
+            intent_dist = df_merged['intent'].value_counts().reset_index()
+            intent_dist.columns = ['Intent', 'Count']
+
+            intent_pie = alt.Chart(intent_dist).mark_arc().encode(
+                theta=alt.Theta('Count:Q'),
+                color=alt.Color('Intent:N'),
+                tooltip=['Intent', 'Count']
+            ).properties(height=300)
+            st.altair_chart(intent_pie, use_container_width=True, theme=None)
 
         # Download buttons
-        col1, col2, col3 = st.columns(3)
+        st.divider()
+        st.subheader("Export Data")
+
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             csv_data = df_merged.to_csv(index=False).encode("utf-8")
             st.download_button("Download Detailed Data (CSV)", csv_data, "keyword_intent_details.csv", "text/csv", key="d1")
-        
+
         with col2:
             summary_csv = summary.to_csv(index=False).encode("utf-8")
             st.download_button("Download Intent Summary (CSV)", summary_csv, "intent_summary.csv", "text/csv", key="d2")
-        
+
         with col3:
             overview_csv = blended_overview.to_csv(index=False).encode("utf-8")
             st.download_button("Download Blended Overview (CSV)", overview_csv, "blended_overview.csv", "text/csv", key="d3")
+
+        with col4:
+            # Excel export with multiple sheets
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                df_merged.to_excel(writer, sheet_name='All Keywords', index=False)
+                summary.to_excel(writer, sheet_name='Intent Summary', index=False)
+                blended_overview.to_excel(writer, sheet_name='Blended Overview', index=False)
+
+                if not df_negatives.empty:
+                    df_negatives.to_excel(writer, sheet_name='Negative Keywords', index=False)
+
+                group_analysis.to_excel(writer, sheet_name='Keyword Groups', index=False)
+
+            excel_buffer.seek(0)
+            st.download_button(
+                "Download Full Report (Excel)",
+                excel_buffer,
+                "keyword_analysis_report.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="excel_download"
+            )
 
     else:
         st.warning("Could not generate intent summary as no intent data was returned.")
