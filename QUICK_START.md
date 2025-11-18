@@ -71,6 +71,7 @@ The app will open in your browser at `http://localhost:8501`
 | Feature | What It Does |
 |---------|-------------|
 | **Analysis Mode** | Choose: Seed keyword, Upload list, or Scan website |
+| **Pre-Filter Negatives** | Exclude keywords before running API (saves costs) |
 | **Advanced Filters** | Filter by volume, CPC, competition, intent |
 | **CTR/CVR Assumptions** | Set expected click and conversion rates by intent |
 | **Custom Budget** | Plan spending and allocation |
@@ -82,6 +83,7 @@ The app will open in your browser at `http://localhost:8501`
 | Section | What You Get |
 |---------|-------------|
 | **Keyword Analysis Results** | All keywords with difficulty & opportunity scores |
+| **Post-Filter Negatives** | Refine results by adding more exclusions |
 | **Quick Wins** | Low-hanging fruit keywords |
 | **Competitive Insights** | High-competition vs low-competition keywords |
 | **Negative Keywords** | Suggested exclusions to save budget |
@@ -94,6 +96,25 @@ The app will open in your browser at `http://localhost:8501`
 ---
 
 ## Common Tasks
+
+### Use Negative Keyword Filtering:
+
+**Pre-Filter (Before Analysis):**
+1. In sidebar, find **"Pre-Filter Negative Keywords"**
+2. Enter terms to exclude (e.g., "free, cheap, job, jobs, career")
+3. Choose match type:
+   - **Contains:** Removes any keyword containing these terms
+   - **Exact Match:** Only removes exact matches
+4. Run analysis - these keywords won't be fetched
+
+**Post-Filter (After Results Load):**
+1. Review your results
+2. Expand **"Add More Negative Keywords (Post-Filter)"**
+3. Enter additional terms to exclude
+4. Click **"Apply Post-Filter"**
+5. All sections update instantly
+
+**Pro Tip:** Use pre-filter for brand negatives and known irrelevant terms. Use post-filter to iteratively refine after seeing the data.
 
 ### Filter to Your Target CPC:
 

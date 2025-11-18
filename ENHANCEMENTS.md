@@ -190,6 +190,30 @@ Single-file Excel workbook with multiple sheets:
 
 ---
 
+### 12. Negative Keyword Filtering (Pre & Post)
+**Location:** Sidebar (Pre-filter) + Results expander (Post-filter)
+
+#### Pre-Filter (Before API Call):
+- Add negative keywords in the sidebar before running analysis
+- Keywords are filtered out before API costs are incurred
+- Supports two match types:
+  - **Contains:** Excludes keywords containing the term (e.g., "free" removes "free trial", "free shipping")
+  - **Exact Match:** Only removes exact matches
+- Accepts comma-separated or line-separated input
+- Shows count of active negative terms
+
+#### Post-Filter (After Results Load):
+- Refine results without re-running API calls
+- Add additional negatives after seeing the data
+- Instantly updates all analysis sections
+- Useful for iterative refinement
+
+**Use Case:**
+- Pre-filter: Block known irrelevant terms (brand negatives, job-related keywords)
+- Post-filter: Remove specific keywords you discover in the results that aren't relevant
+
+---
+
 ## How to Use - Best Practices
 
 ### For Campaign Planning
