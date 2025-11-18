@@ -226,6 +226,40 @@ def optimize_budget_allocation(summary_df, total_budget):
 
     return summary_df
 
+def parse_negative_keywords(input_text):
+    """Parse negative keywords from text input (comma or newline separated)"""
+    if not input_text or not input_text.strip():
+        return []
+
+    # Split by newlines and commas
+    negatives = []
+    for line in input_text.split('\n'):
+        for term in line.split(','):
+            term = term.strip().lower()
+            if term:
+                negatives.append(term)
+
+    return list(set(negatives))  # Remove duplicates
+
+def apply_negative_keywords(df, negative_terms, match_type="Contains"):
+    """Filter out keywords based on negative terms"""
+    if not negative_terms or df.empty:
+        return df, 0
+
+    original_count = len(df)
+    df_filtered = df.copy()
+
+    if match_type == "Exact Match":
+        # Exact match: keyword must exactly match one of the negative terms
+        df_filtered = df_filtered[~df_filtered['keyword'].str.lower().isin(negative_terms)]
+    else:
+        # Contains: keyword must not contain any of the negative terms
+        for term in negative_terms:
+            df_filtered = df_filtered[~df_filtered['keyword'].str.lower().str.contains(term, regex=False, na=False)]
+
+    filtered_count = original_count - len(df_filtered)
+    return df_filtered, filtered_count
+
 # Streamlit configuration
 st.set_page_config(page_title="Labs Keyword Ideas + Intent (Live)", layout="wide")
 st.title("DataForSEO Labs — Keyword & Intent Planner")
@@ -344,6 +378,29 @@ with st.sidebar:
         seed_keyword = None
 
     usd_to_gbp_rate = st.number_input("USD to GBP Exchange Rate", 0.1, 2.0, 0.79, 0.01)
+
+    st.divider()
+    st.header("Pre-Filter Negative Keywords")
+    st.caption("Exclude keywords containing these terms (applied before analysis)")
+    pre_negatives_input = st.text_area(
+        "Enter negative keywords (one per line or comma-separated)",
+        value="",
+        height=100,
+        placeholder="e.g., free, cheap, job, jobs\ncareer, salary",
+        key="pre_negatives"
+    )
+
+    match_type = st.radio(
+        "Match Type",
+        ("Contains", "Exact Match"),
+        help="Contains: Filter if keyword contains the term. Exact: Filter only if exact match."
+    )
+
+    # Show active negative keywords count
+    if pre_negatives_input.strip():
+        active_negatives = parse_negative_keywords(pre_negatives_input)
+        if active_negatives:
+            st.info(f"✓ {len(active_negatives)} negative term(s) active: {', '.join(active_negatives[:5])}{'...' if len(active_negatives) > 5 else ''}")
 
     st.divider()
     st.caption("CTR/CVR Assumptions by Intent")
@@ -698,7 +755,14 @@ if st.button("Analyse Keywords", type="primary"):
         df_metrics['competition'] = pd.to_numeric(df_metrics['competition'], errors='coerce').fillna(0)
         
         df_metrics['keyword_clean'] = df_metrics['keyword'].str.lower().str.strip()
-        
+
+        # Apply pre-filter negative keywords
+        pre_negatives = parse_negative_keywords(pre_negatives_input)
+        if pre_negatives:
+            df_metrics, pre_filtered_count = apply_negative_keywords(df_metrics, pre_negatives, match_type)
+            if pre_filtered_count > 0:
+                st.success(f"Pre-filtered {pre_filtered_count} keywords based on your negative keyword list")
+
         intent_keywords = df_metrics['keyword_clean'].tolist()
         df_intent = get_search_intent(intent_keywords, language_code)
 
@@ -780,6 +844,45 @@ if st.session_state.results:
 
     display_cols = ['keyword', 'search_volume', 'cpc_gbp', 'competition', 'intent', 'difficulty_score', 'opportunity_score', 'keyword_group']
     st.dataframe(df_merged[display_cols].sort_values('opportunity_score', ascending=False), use_container_width=True, height=400)
+
+    # Post-Filter Negative Keywords
+    st.divider()
+    with st.expander("🚫 Add More Negative Keywords (Post-Filter)", expanded=False):
+        st.caption("Refine results by excluding additional keywords. This filters the displayed data without re-running the API.")
+
+        post_negatives_input = st.text_area(
+            "Enter additional negative keywords to filter out",
+            value="",
+            height=80,
+            placeholder="e.g., training, course, tutorial",
+            key="post_negatives",
+            help="Separate by commas or new lines"
+        )
+
+        post_match_col1, post_match_col2 = st.columns([1, 2])
+        with post_match_col1:
+            post_match_type = st.radio(
+                "Match Type",
+                ("Contains", "Exact Match"),
+                key="post_match_type",
+                help="Contains: Filter if keyword contains the term. Exact: Filter only if exact match."
+            )
+
+        with post_match_col2:
+            if st.button("Apply Post-Filter", type="secondary"):
+                post_negatives = parse_negative_keywords(post_negatives_input)
+                if post_negatives:
+                    df_temp, post_filtered_count = apply_negative_keywords(df_merged, post_negatives, post_match_type)
+                    if post_filtered_count > 0:
+                        # Update session state with filtered data
+                        st.session_state.results["df_merged"] = df_temp
+                        st.success(f"✅ Filtered out {post_filtered_count} keywords. {len(df_temp)} keywords remaining.")
+                        st.info("🔄 Results updated! The analysis below now reflects your filters. Refresh the page or re-run to reset.")
+                        st.rerun()  # Rerun to update all downstream calculations
+                    else:
+                        st.info("No keywords matched your negative filters.")
+                else:
+                    st.warning("Please enter at least one negative keyword.")
 
     # Quick Wins Section
     st.divider()
